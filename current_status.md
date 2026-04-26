@@ -76,14 +76,28 @@ data/processed/final/
 - Train accuracy ≈ 70–78%
 - Test accuracy ≈ ~68–69%
 
-✔ Significant improvement over SVM  
-✔ Model is learning meaningful patterns
+✔ Improvement over SVM  
+⚠ Not good enough yet  
+⚠ Requires significant improvements and tuning
 
 ---
 
 # ⚠ CURRENT ISSUES
 
-## 1. Validation Problem
+## 1. CNN Performance
+
+- Current CNN performance is not satisfactory
+- Needs:
+  - better architecture
+  - better preprocessing
+  - improved training strategy
+  - handling imbalance and noise
+
+👉 Overall: **major improvements required**
+
+---
+
+## 2. Validation Problem
 
 - Validation accuracy stuck ~0.20
 - Due to incorrect validation setup
@@ -93,7 +107,7 @@ data/processed/final/
 
 ---
 
-## 2. Label Noise
+## 3. Label Noise
 
 - Generated labels are imperfect
 - Some misclassification in dataset
@@ -115,6 +129,7 @@ data/processed/final/
 - Handling class imbalance
 - Improving robustness
 - Better validation strategy
+- CNN architecture improvements
 
 ---
 
@@ -144,7 +159,7 @@ data/processed/final/
 
 # 📊 CURRENT PERFORMANCE SUMMARY
 
-| Model | Accuracy | Status     |
-| ----- | -------- | ---------- |
-| SVM   | ~46%     | Baseline   |
-| CNN   | ~69%     | Main model |
+| Model | Accuracy | Status                  |
+| ----- | -------- | ----------------------- |
+| SVM   | ~46%     | Baseline                |
+| CNN   | ~69%     | Needs major improvement |
