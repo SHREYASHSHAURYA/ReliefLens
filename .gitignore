@@ -1,8 +1,14 @@
 __pycache__/
 *.pyc
 
+.venv/
 venv/
 
 outputs/
+data/
 
 *.npy
+*.keras
+*.json
+!label_map.json
+!metrics.json
