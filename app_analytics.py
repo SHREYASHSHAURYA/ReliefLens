@@ -7,6 +7,10 @@ from typing import List, Dict, Any
 import random
 from collections import Counter
 import pandas as pd
+import io
+import csv
+import datetime
+import json as _json
 
 
 def load_module_from_path(module_name: str, path: str):
@@ -19,7 +23,6 @@ def load_module_from_path(module_name: str, path: str):
 
 BASE = os.path.join(os.path.dirname(__file__), "ReliefLens-BDA", "bda features")
 
-# Map desired relieflens.* names to actual files in the repo
 MODULE_MAP = {
     "relieflens.analytics.threshold": os.path.join(BASE, "analytics", "threshold.py"),
     "relieflens.analytics.topk": os.path.join(BASE, "analytics", "topk.py"),
@@ -42,7 +45,6 @@ def ensure_modules():
     import types
 
     for name, path in MODULE_MAP.items():
-        # ensure parent packages exist
         parts = name.split(".")
         for i in range(1, len(parts)):
             parent = ".".join(parts[:i])
@@ -50,7 +52,6 @@ def ensure_modules():
                 pkg = types.ModuleType(parent)
                 pkg.__path__ = []
                 sys.modules[parent] = pkg
-
         if name in sys.modules:
             continue
         if not os.path.exists(path):
@@ -85,27 +86,14 @@ st.markdown(
     .stSidebar .sidebar-content { background: var(--panel); }
     .stMetricValue { color: #0f1724 !important; }
     .dataframe, table { background: var(--panel) }
-    /* Align table content directly under column headers and collapse spacing */
-    table.dataframe, .stDataFrame table, table {
-        border-collapse: collapse !important;
-        border-spacing: 0 !important;
-    }
-    table.dataframe thead th, table thead th, .stDataFrame table thead th {
-        vertical-align: bottom !important;
-        padding-top: 6px !important;
-        padding-bottom: 2px !important;
-    }
-    table.dataframe tbody td, table tbody td, .stDataFrame table tbody td {
-        vertical-align: top !important;
-        padding-top: 2px !important;
-        padding-bottom: 6px !important;
-        line-height: 1.1 !important;
-    }
+    table.dataframe, .stDataFrame table, table { border-collapse: collapse !important; border-spacing: 0 !important; }
+    table.dataframe thead th, table thead th, .stDataFrame table thead th { vertical-align: bottom !important; padding-top: 6px !important; padding-bottom: 2px !important; }
+    table.dataframe tbody td, table tbody td, .stDataFrame table tbody td { vertical-align: top !important; padding-top: 2px !important; padding-bottom: 6px !important; line-height: 1.1 !important; }
     .stDataFrame table tbody tr td:first-child { padding-left: 10px !important; }
     .stDataFrame table thead th { padding-left: 10px !important; }
     .stButton>button { background-color: var(--accent); color: #fff; border: none }
     </style>
-    """,
+""",
     unsafe_allow_html=True,
 )
 
@@ -119,34 +107,53 @@ with st.container():
         unsafe_allow_html=True,
     )
 
-
+# ── Session state defaults ────────────────────────────────────────────────────
 if "predictions" not in st.session_state:
     st.session_state.predictions = []
 if "logs" not in st.session_state:
     st.session_state.logs = []
+if "run_result" not in st.session_state:
+    st.session_state.run_result = None
 
-
-with st.sidebar.form(key="controls"):
-    st.header("Control Panel")
-    n_preds = st.slider("Number of predictions", 10, 100, 50)
-    n_regions = st.slider("Number of regions", 2, 6, 3)
-    disaster_options = ["Flood", "Fire", "Earthquake", "Cyclone"]
-    disasters = st.multiselect(
-        "Disaster types", disaster_options, default=disaster_options[:2]
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    # Navigation radio — THIS is what replaces st.tabs.
+    # session_state key "active_tab" persists across every rerun automatically.
+    st.header("Navigate")
+    TAB_NAMES = [
+        "Overview",
+        "MapReduce",
+        "Top-K",
+        "Threshold",
+        "Spark Logs",
+        "Cassandra",
+        "MongoDB",
+        "Export",
+    ]
+    selected_tab = st.radio(
+        "", TAB_NAMES, key="active_tab", label_visibility="collapsed"
     )
-    threshold_val = st.slider("Threshold for severe detection", 0.3, 0.9, 0.7, 0.01)
-    top_k = st.slider("Top-K value", 3, 15, 5)
-    error_rate = st.slider("Error log rate", 0.0, 1.0, 0.25, 0.05)
-    generate = st.form_submit_button("Generate Data")
-    run_analytics_btn = st.form_submit_button("Run Analytics")
+
+    st.divider()
+
+    with st.form(key="controls"):
+        st.header("Control Panel")
+        n_preds = st.slider("Number of predictions", 10, 100, 50)
+        n_regions = st.slider("Number of regions", 2, 6, 3)
+        disaster_options = ["Flood", "Fire", "Earthquake", "Cyclone"]
+        disasters = st.multiselect(
+            "Disaster types", disaster_options, default=disaster_options[:2]
+        )
+        threshold_val = st.slider("Threshold for severe detection", 0.3, 0.9, 0.7, 0.01)
+        top_k = st.slider("Top-K value", 3, 15, 5)
+        error_rate = st.slider("Error log rate", 0.0, 1.0, 0.25, 0.05)
+        generate = st.form_submit_button("Generate Data")
+        run_analytics_btn = st.form_submit_button("Run Analytics")
 
 
-def synthesize_predictions(
-    n: int, regions: int, disasters: List[str], error_rate: float = 0.25
-) -> (List[Any], List[Dict[str, Any]]):
+def synthesize_predictions(n, regions, disasters, error_rate=0.25):
     region_names = [f"Zone{chr(65+i)}" for i in range(regions)]
-    preds = []
-    logs = []
+    preds, logs = [], []
     ERR_CODES = ["ERR01", "ERR02", "ERR03", "ERR04"]
     for i in range(n):
         region = random.choice(region_names)
@@ -155,11 +162,9 @@ def synthesize_predictions(
             if disasters
             else random.choice(["Flood", "Fire", "Earthquake", "Cyclone"])
         )
-        # probabilities: 4 classes
         probs = [random.random() for _ in range(4)]
         s = sum(probs)
         probs = [p / s for p in probs]
-        # predicted class biased by probabilities (argmax)
         pred_class = int(max(range(4), key=lambda j: probs[j]))
         P = rl_pipeline.Prediction(
             region=region,
@@ -168,7 +173,6 @@ def synthesize_predictions(
             probabilities=probs,
         )
         preds.append(P)
-        # logs: randomly include some error codes
         if random.random() < error_rate:
             logs.append(
                 {
@@ -188,47 +192,32 @@ if generate:
     )
     st.session_state.predictions = preds
     st.session_state.logs = logs
+    st.session_state.run_result = None  # reset stale analytics on new data
     st.success(f"Generated {len(preds)} predictions across {n_regions} regions.")
 
-
-def safe_run_analytics(preds, logs):
-    try:
-        return rl_pipeline.run_analytics(preds, logs)
-    except Exception as e:
-        st.error(f"Analytics failed: {e}")
-        return None
-
-
-run_result = None
 if run_analytics_btn:
     if not st.session_state.predictions:
         st.warning("Please generate data before running analytics.")
     else:
         with st.spinner("Running analytics pipeline..."):
-            run_result = safe_run_analytics(
-                st.session_state.predictions, st.session_state.logs
-            )
-        if run_result:
+            try:
+                st.session_state.run_result = rl_pipeline.run_analytics(
+                    st.session_state.predictions, st.session_state.logs
+                )
+            except Exception as e:
+                st.error(f"Analytics failed: {e}")
+                st.session_state.run_result = None
+        if st.session_state.run_result:
             st.success("Analytics complete.")
 
+# Convenience alias so tab code reads cleanly
+run_result = st.session_state.run_result
 
-tabs = st.tabs(
-    [
-        "Overview",
-        "MapReduce",
-        "Top-K",
-        "Threshold",
-        "Spark Logs",
-        "Cassandra",
-        "MongoDB",
-        "Export",
-    ]
-)
+# ── Tab content — plain if/elif, no st.tabs() ────────────────────────────────
 
-# Overview
-with tabs[0]:
+if selected_tab == "Overview":
     st.subheader("📊 Overview")
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+    col1, col2, col3, col4 = st.columns(4)
     total_preds = len(st.session_state.predictions)
     severe_ct = (
         rl_threshold.count_severe(st.session_state.predictions, threshold=threshold_val)
@@ -249,9 +238,7 @@ with tabs[0]:
     col2.metric("Severe Cases", severe_ct)
     col3.metric("Unique Regions", unique_regions)
     col4.metric("Logs w/ errors", logs_with_errors)
-
     st.markdown("##")
-    # Bar chart predictions per region
     if st.session_state.predictions:
         df = pd.DataFrame(
             [
@@ -265,11 +252,26 @@ with tabs[0]:
         )
         region_counts = df.groupby("region").size().reset_index(name="count")
         st.bar_chart(data=region_counts.set_index("region"))
+        st.markdown("---")
+        dcol1, dcol2 = st.columns([2, 1])
+        with dcol1:
+            st.markdown("**Disaster breakdown**")
+            disaster_counts = df.groupby("disaster").size().reset_index(name="count")
+            st.dataframe(disaster_counts.set_index("disaster"))
+            st.bar_chart(data=disaster_counts.set_index("disaster"))
+        with dcol2:
+            st.markdown("**Region details**")
+            regions = sorted(df["region"].unique())
+            sel = st.selectbox("Select region", ["(all)"] + regions)
+            if sel and sel != "(all)":
+                rr = df[df["region"] == sel]
+                st.metric("Predictions", len(rr))
+                st.metric("Avg severity", float(rr["severity"].mean()))
+                st.dataframe(rr)
     else:
         st.info("No data generated yet. Use the sidebar to generate data.")
 
-# MapReduce
-with tabs[1]:
+elif selected_tab == "MapReduce":
     st.subheader("🔁 MapReduce")
     if run_result and run_result.get("avg_severity"):
         table_rows = [
@@ -284,28 +286,43 @@ with tabs[1]:
             st.markdown(
                 "MapReduce maps each prediction to a (region,disaster) key, shuffles and groups values, then reduces by averaging severity. This simulates distributed aggregation across partitions."
             )
+        try:
+            df_map = pd.DataFrame(table_rows)
+            if not df_map.empty:
+                st.markdown("**Avg severity by disaster**")
+                st.bar_chart(df_map.groupby("disaster_type")["avg_severity"].mean())
+        except Exception:
+            pass
     else:
         st.info("Run analytics to see MapReduce results.")
 
-# Top-K
-with tabs[2]:
+elif selected_tab == "Top-K":
     st.subheader("🔥 Top-K Hotspots")
     if st.session_state.predictions:
-        k = top_k
-        topk_list = rl_topk.top_k_regions(st.session_state.predictions, k=k)
+        topk_list = rl_topk.top_k_regions(st.session_state.predictions, k=top_k)
         if topk_list:
             dfk = pd.DataFrame(topk_list, columns=["region", "count"]).set_index(
                 "region"
             )
             st.bar_chart(dfk)
             st.dataframe(dfk)
+            csv_buf = io.StringIO()
+            writer = csv.writer(csv_buf)
+            writer.writerow(["region", "count"])
+            for r, c in topk_list:
+                writer.writerow([r, c])
+            st.download_button(
+                "Download Top-K CSV",
+                data=csv_buf.getvalue(),
+                file_name="topk_hotspots.csv",
+                mime="text/csv",
+            )
         else:
             st.info("No hotspots detected")
     else:
         st.info("Generate data to compute Top-K hotspots.")
 
-# Threshold
-with tabs[3]:
+elif selected_tab == "Threshold":
     st.subheader("⚠️ Threshold Analysis")
     if st.session_state.predictions:
         severe_count = rl_threshold.count_severe(
@@ -339,8 +356,7 @@ with tabs[3]:
     else:
         st.info("Generate data to run threshold analysis.")
 
-# Spark Logs
-with tabs[4]:
+elif selected_tab == "Spark Logs":
     st.subheader("🟣 Spark Logs")
     if st.session_state.logs:
         all_errors = []
@@ -359,11 +375,28 @@ with tabs[4]:
             st.write(
                 "This simulates flatMap -> map -> reduceByKey -> filter. Only errors with counts > 10 are considered critical in our filter step."
             )
+        with st.expander("Log exploration"):
+            query = st.text_input("Filter error code (e.g. ERR01)")
+            timeline = [
+                {"index": i, "n_errors": len(entry.get("errors", []))}
+                for i, entry in enumerate(st.session_state.logs)
+            ]
+            tdf = pd.DataFrame(timeline)
+            if not tdf.empty:
+                st.line_chart(tdf.set_index("index"))
+            if query:
+                filtered = [
+                    e
+                    for e in st.session_state.logs
+                    if query in (" ".join(e.get("errors", [])))
+                ]
+                st.markdown(f"Found {len(filtered)} entries matching '{query}'")
+                if filtered:
+                    st.dataframe(pd.DataFrame(filtered))
     else:
         st.info("No logs available. Generate data with logs enabled.")
 
-# Cassandra
-with tabs[5]:
+elif selected_tab == "Cassandra":
     st.subheader("🗄️ Cassandra (Simulation)")
     st.code(rl_cassandra.CQL_SCHEMA, language="sql")
     if run_result and run_result.get("cassandra_snapshot"):
@@ -372,13 +405,32 @@ with tabs[5]:
         st.markdown(
             "**TTL concept:** rows can be inserted with a TTL and will expire; this simulation stores an `expires_at` timestamp when TTL is used."
         )
+        with st.expander("Cassandra TTL simulator"):
+            try:
+                now = datetime.datetime.utcnow().timestamp()
+                df_cas["expires_at"] = pd.to_numeric(
+                    df_cas.get("expires_at", pd.Series([None] * len(df_cas))),
+                    errors="coerce",
+                )
+                alive = df_cas[
+                    df_cas["expires_at"].isna() | (df_cas["expires_at"] > now)
+                ]
+                expired = df_cas[
+                    ~(df_cas["expires_at"].isna() | (df_cas["expires_at"] > now))
+                ]
+                st.markdown(
+                    f"**Alive rows:** {len(alive)} — **Expired rows:** {len(expired)}"
+                )
+                if st.button("Show expired rows"):
+                    st.dataframe(expired)
+            except Exception:
+                st.write("TTL simulator not available for this snapshot.")
     else:
         st.info(
             "Run analytics to write aggregated records to the Cassandra simulation."
         )
 
-# MongoDB
-with tabs[6]:
+elif selected_tab == "MongoDB":
     st.subheader("🟠 MongoDB (Simulation)")
     mongo = rl_mongo.MongoSim()
     if st.session_state.predictions:
@@ -399,11 +451,71 @@ with tabs[6]:
                 "region"
             )
         )
+
+        with st.expander("Query & export predictions"):
+            st.markdown("Examples: `{'region':'ZoneA'}`, `{'disaster_type':'Flood'}`")
+            q_text = st.text_input(
+                "Query (JSON, leave blank for all)", value="", key="mongo_query_text"
+            )
+            sample_examples = st.selectbox(
+                "Quick examples",
+                (
+                    "--none--",
+                    "{'region':'ZoneA'}",
+                    "{'disaster_type':'Flood'}",
+                    "{'region':'ZoneA','disaster_type':'Flood'}",
+                ),
+                key="mongo_query_examples",
+            )
+            if sample_examples != "--none--" and q_text == "":
+                q_text = sample_examples
+
+            docs_all = mongo.find_all("predictions")
+
+            if st.button("Run query", key="mongo_run_query"):
+                if q_text:
+                    try:
+                        qobj = _json.loads(q_text.replace("'", '"'))
+
+                        def matches(doc, q):
+                            return all(doc.get(k) == v for k, v in q.items())
+
+                        st.session_state["mongo_query_results"] = [
+                            d for d in docs_all if matches(d, qobj)
+                        ]
+                    except Exception as e:
+                        st.error(f"Invalid query JSON: {e}")
+                        st.session_state["mongo_query_results"] = []
+                else:
+                    st.session_state["mongo_query_results"] = docs_all
+                st.session_state["mongo_query_last"] = (
+                    datetime.datetime.utcnow().isoformat()
+                )
+
+            # Always read from session_state — persists across reruns without touching tabs
+            display_docs = st.session_state.get("mongo_query_results", docs_all)
+
+            if display_docs:
+                st.dataframe(pd.DataFrame(display_docs))
+                if st.session_state.get("mongo_query_last"):
+                    st.markdown(
+                        f"**Last query run:** {st.session_state['mongo_query_last']}"
+                    )
+            else:
+                st.write("No documents match the query.")
+
+            # Download button always rendered unconditionally — never nested inside st.button
+            st.download_button(
+                "Download JSON of current query results",
+                data=_json.dumps(display_docs, default=str, indent=2),
+                file_name="predictions.json",
+                mime="application/json",
+                key="mongo_download_json",
+            )
     else:
         st.info("Generate data to populate the MongoDB simulation.")
 
-# Export
-with tabs[7]:
+elif selected_tab == "Export":
     st.subheader("📤 Export")
     if (
         run_result
@@ -419,25 +531,25 @@ with tabs[7]:
     else:
         st.info("No export available yet. Run analytics to generate CSV.")
 
-
+# ── Preview expander (always visible) ────────────────────────────────────────
 with st.expander("Preview Data & Logs"):
     st.markdown("**First 10 predictions**")
     if st.session_state.predictions:
-        df_preview = pd.DataFrame(
-            [
-                {
-                    "region": p.region,
-                    "disaster": p.disaster_type,
-                    "predicted_class": p.predicted_class,
-                    "probabilities": p.probabilities,
-                }
-                for p in st.session_state.predictions[:10]
-            ]
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "region": p.region,
+                        "disaster": p.disaster_type,
+                        "predicted_class": p.predicted_class,
+                        "probabilities": p.probabilities,
+                    }
+                    for p in st.session_state.predictions[:10]
+                ]
+            )
         )
-        st.dataframe(df_preview)
     else:
         st.write("No predictions yet.")
-
     st.markdown("**Logs preview (first 10 entries)**")
     if st.session_state.logs:
         st.dataframe(pd.DataFrame(st.session_state.logs[:10]))
