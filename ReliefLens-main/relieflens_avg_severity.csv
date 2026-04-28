@@ -1,0 +1,3 @@
+region,disaster_type,avg_severity,timestamp
+ZoneA,Flood,2.5,2026-04-28T14:42:06.330534
+ZoneB,Fire,1.0,2026-04-28T14:42:06.330534
