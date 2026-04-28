@@ -278,7 +278,64 @@ elif selected_tab == "MapReduce":
             {"region": k[0], "disaster_type": k[1], "avg_severity": v}
             for k, v in run_result["avg_severity"].items()
         ]
-        st.dataframe(pd.DataFrame(table_rows))
+        df_map = pd.DataFrame(table_rows)
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Total partitions", len(table_rows))
+        mc2.metric("Unique regions", df_map["region"].nunique())
+        mc3.metric("Unique disaster types", df_map["disaster_type"].nunique())
+        mc4.metric("Overall avg severity", f"{df_map['avg_severity'].mean():.3f}")
+        st.markdown("---")
+
+        # ── Interactive filters ───────────────────────────────────────────────
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            region_filter = st.multiselect(
+                "Filter by region",
+                options=sorted(df_map["region"].unique()),
+                default=sorted(df_map["region"].unique()),
+                key="mr_region_filter",
+            )
+        with fcol2:
+            disaster_filter = st.multiselect(
+                "Filter by disaster type",
+                options=sorted(df_map["disaster_type"].unique()),
+                default=sorted(df_map["disaster_type"].unique()),
+                key="mr_disaster_filter",
+            )
+        severity_range = st.slider(
+            "Avg severity range",
+            min_value=float(df_map["avg_severity"].min()),
+            max_value=float(df_map["avg_severity"].max()),
+            value=(
+                float(df_map["avg_severity"].min()),
+                float(df_map["avg_severity"].max()),
+            ),
+            key="mr_severity_slider",
+        )
+
+        df_filtered = df_map[
+            df_map["region"].isin(region_filter)
+            & df_map["disaster_type"].isin(disaster_filter)
+            & df_map["avg_severity"].between(*severity_range)
+        ]
+        st.markdown(f"**Showing {len(df_filtered)} of {len(df_map)} partitions**")
+        st.dataframe(df_filtered.reset_index(drop=True))
+
+        st.markdown("---")
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            st.markdown("**Avg severity by disaster type**")
+            st.bar_chart(df_filtered.groupby("disaster_type")["avg_severity"].mean())
+        with ch2:
+            st.markdown("**Avg severity by region**")
+            st.bar_chart(df_filtered.groupby("region")["avg_severity"].mean())
+
+        # ── Complexity + how-it-works ─────────────────────────────────────────
+        st.markdown("---")
         complexities = rl_mapreduce.compute_complexity()
         st.markdown("**Complexity**")
         st.write(complexities)
@@ -286,13 +343,6 @@ elif selected_tab == "MapReduce":
             st.markdown(
                 "MapReduce maps each prediction to a (region,disaster) key, shuffles and groups values, then reduces by averaging severity. This simulates distributed aggregation across partitions."
             )
-        try:
-            df_map = pd.DataFrame(table_rows)
-            if not df_map.empty:
-                st.markdown("**Avg severity by disaster**")
-                st.bar_chart(df_map.groupby("disaster_type")["avg_severity"].mean())
-        except Exception:
-            pass
     else:
         st.info("Run analytics to see MapReduce results.")
 
@@ -301,11 +351,88 @@ elif selected_tab == "Top-K":
     if st.session_state.predictions:
         topk_list = rl_topk.top_k_regions(st.session_state.predictions, k=top_k)
         if topk_list:
-            dfk = pd.DataFrame(topk_list, columns=["region", "count"]).set_index(
-                "region"
+            df_all = pd.DataFrame(
+                [
+                    {
+                        "region": p.region,
+                        "disaster_type": p.disaster_type,
+                        "severity": p.severity_score,
+                    }
+                    for p in st.session_state.predictions
+                ]
             )
-            st.bar_chart(dfk)
-            st.dataframe(dfk)
+            dfk = pd.DataFrame(topk_list, columns=["region", "count"])
+
+            # ── Summary metrics ───────────────────────────────────────────────
+            total_in_hotspots = dfk["count"].sum()
+            total_preds = len(st.session_state.predictions)
+            top1_region = dfk.iloc[0]["region"]
+            top1_count = int(dfk.iloc[0]["count"])
+            avg_sev_top1 = df_all[df_all["region"] == top1_region]["severity"].mean()
+
+            km1, km2, km3, km4 = st.columns(4)
+            km1.metric("Top hotspot", top1_region)
+            km2.metric(f"{top1_region} predictions", top1_count)
+            km3.metric(f"{top1_region} avg severity", f"{avg_sev_top1:.3f}")
+            km4.metric(
+                f"Top-{top_k} share of total",
+                f"{total_in_hotspots/total_preds*100:.1f}%",
+            )
+            st.markdown("---")
+
+            # ── Interactive N slicer ──────────────────────────────────────────
+            max_k = len(topk_list)
+            display_k = st.slider(
+                "Show top N regions",
+                min_value=1,
+                max_value=max_k,
+                value=max_k,
+                key="topk_display_k",
+            )
+            dfk_display = dfk.head(display_k).set_index("region")
+
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                st.markdown("**Prediction count by region**")
+                st.bar_chart(dfk_display)
+            with ch2:
+                st.markdown("**Avg severity by region**")
+                sev_by_region = (
+                    df_all[df_all["region"].isin(dfk_display.index)]
+                    .groupby("region")["severity"]
+                    .mean()
+                    .reindex(dfk_display.index)
+                )
+                st.bar_chart(sev_by_region)
+
+            # ── Cumulative share ──────────────────────────────────────────────
+            st.markdown("**Cumulative prediction share across top-N regions**")
+            dfk_cum = dfk.copy()
+            dfk_cum["cumulative_%"] = (
+                dfk_cum["count"].cumsum() / total_preds * 100
+            ).round(1)
+            dfk_cum.index = range(1, len(dfk_cum) + 1)
+            st.line_chart(dfk_cum["cumulative_%"])
+
+            # ── Per-hotspot disaster breakdown ────────────────────────────────
+            st.markdown("**Disaster type breakdown for a selected hotspot**")
+            breakdown_filter = st.selectbox(
+                "Select region to inspect",
+                options=[r for r, _ in topk_list],
+                key="topk_region_inspect",
+            )
+            region_df = df_all[df_all["region"] == breakdown_filter]
+            dis_counts = (
+                region_df.groupby("disaster_type").size().reset_index(name="count")
+            )
+            bcol1, bcol2 = st.columns(2)
+            with bcol1:
+                st.dataframe(dis_counts.set_index("disaster_type"))
+            with bcol2:
+                st.bar_chart(dis_counts.set_index("disaster_type"))
+
+            st.markdown("---")
+            st.dataframe(dfk_display)
             csv_buf = io.StringIO()
             writer = csv.writer(csv_buf)
             writer.writerow(["region", "count"])
@@ -400,23 +527,95 @@ elif selected_tab == "Cassandra":
     st.subheader("🗄️ Cassandra (Simulation)")
     st.code(rl_cassandra.CQL_SCHEMA, language="sql")
     if run_result and run_result.get("cassandra_snapshot"):
-        df_cas = pd.DataFrame(run_result["cassandra_snapshot"]).fillna("")
-        st.dataframe(df_cas)
+        df_cas_raw = pd.DataFrame(run_result["cassandra_snapshot"]).fillna("")
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        cm1, cm2, cm3 = st.columns(3)
+        cm1.metric("Total rows", len(df_cas_raw))
+        cm2.metric("Columns", len(df_cas_raw.columns))
+        numeric_cols = df_cas_raw.select_dtypes(include="number").columns.tolist()
+        if numeric_cols:
+            cm3.metric(
+                f"Avg {numeric_cols[0]}",
+                f"{pd.to_numeric(df_cas_raw[numeric_cols[0]], errors='coerce').mean():.3f}",
+            )
+        st.markdown("---")
+
+        # ── Interactive column selector ───────────────────────────────────────
+        all_cols = df_cas_raw.columns.tolist()
+        selected_cols = st.multiselect(
+            "Choose columns to display",
+            options=all_cols,
+            default=all_cols,
+            key="cas_col_select",
+        )
+        df_cas = df_cas_raw[selected_cols] if selected_cols else df_cas_raw
+
+        # ── Sort control ──────────────────────────────────────────────────────
+        sort_col1, sort_col2 = st.columns(2)
+        with sort_col1:
+            sort_by = st.selectbox(
+                "Sort by column", options=["(none)"] + selected_cols, key="cas_sort_col"
+            )
+        with sort_col2:
+            sort_asc = st.radio(
+                "Order",
+                ["Ascending", "Descending"],
+                horizontal=True,
+                key="cas_sort_order",
+            )
+        if sort_by != "(none)":
+            df_cas = df_cas.sort_values(sort_by, ascending=(sort_asc == "Ascending"))
+
+        # ── Row search ────────────────────────────────────────────────────────
+        row_search = st.text_input(
+            "Search rows (matches any column value, case-insensitive)",
+            key="cas_row_search",
+        )
+        if row_search:
+            mask = df_cas.apply(
+                lambda col: col.astype(str).str.contains(
+                    row_search, case=False, na=False
+                )
+            ).any(axis=1)
+            df_cas = df_cas[mask]
+            st.markdown(f"**{len(df_cas)} rows match '{row_search}'**")
+
+        st.dataframe(df_cas.reset_index(drop=True))
+
+        # ── Numeric column chart ──────────────────────────────────────────────
+        if numeric_cols:
+            chart_col = st.selectbox(
+                "Plot distribution of", options=numeric_cols, key="cas_chart_col"
+            )
+            chart_series = pd.to_numeric(
+                df_cas_raw[chart_col], errors="coerce"
+            ).dropna()
+            if not chart_series.empty:
+                st.markdown(f"**Distribution of `{chart_col}`**")
+                hist_df = pd.cut(chart_series, bins=10).value_counts().sort_index()
+                hist_df = hist_df.reset_index()
+                hist_df.columns = ["bin", "count"]
+                hist_df["bin"] = hist_df["bin"].astype(str)
+                st.bar_chart(hist_df.set_index("bin"))
+
+        st.markdown("---")
         st.markdown(
             "**TTL concept:** rows can be inserted with a TTL and will expire; this simulation stores an `expires_at` timestamp when TTL is used."
         )
         with st.expander("Cassandra TTL simulator"):
             try:
                 now = datetime.datetime.utcnow().timestamp()
-                df_cas["expires_at"] = pd.to_numeric(
-                    df_cas.get("expires_at", pd.Series([None] * len(df_cas))),
+                df_ttl = df_cas_raw.copy()
+                df_ttl["expires_at"] = pd.to_numeric(
+                    df_ttl.get("expires_at", pd.Series([None] * len(df_ttl))),
                     errors="coerce",
                 )
-                alive = df_cas[
-                    df_cas["expires_at"].isna() | (df_cas["expires_at"] > now)
+                alive = df_ttl[
+                    df_ttl["expires_at"].isna() | (df_ttl["expires_at"] > now)
                 ]
-                expired = df_cas[
-                    ~(df_cas["expires_at"].isna() | (df_cas["expires_at"] > now))
+                expired = df_ttl[
+                    ~(df_ttl["expires_at"].isna() | (df_ttl["expires_at"] > now))
                 ]
                 st.markdown(
                     f"**Alive rows:** {len(alive)} — **Expired rows:** {len(expired)}"
@@ -443,14 +642,89 @@ elif selected_tab == "MongoDB":
                     "severity": p.severity_score,
                 },
             )
+
+        docs_all = mongo.find_all("predictions")
+        df_mongo = pd.DataFrame(docs_all) if docs_all else pd.DataFrame()
+
+        # ── Summary metrics ───────────────────────────────────────────────────
         total = mongo.count_total("predictions")
-        st.metric("Total records", total)
-        counts = mongo.count_by_field("predictions", "region")
-        st.dataframe(
-            pd.DataFrame(list(counts.items()), columns=["region", "count"]).set_index(
-                "region"
-            )
+        mm1, mm2, mm3, mm4 = st.columns(4)
+        mm1.metric("Total records", total)
+        mm2.metric(
+            "Unique regions", df_mongo["region"].nunique() if not df_mongo.empty else 0
         )
+        mm3.metric(
+            "Unique disaster types",
+            df_mongo["disaster_type"].nunique() if not df_mongo.empty else 0,
+        )
+        mm4.metric(
+            "Avg severity",
+            (
+                f"{pd.to_numeric(df_mongo['severity'], errors='coerce').mean():.3f}"
+                if not df_mongo.empty
+                else "—"
+            ),
+        )
+        st.markdown("---")
+
+        # ── Charts: counts and severity by region/disaster ────────────────────
+        if not df_mongo.empty:
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                st.markdown("**Records per region**")
+                counts_region = mongo.count_by_field("predictions", "region")
+                st.bar_chart(
+                    pd.DataFrame(
+                        list(counts_region.items()), columns=["region", "count"]
+                    ).set_index("region")
+                )
+            with ch2:
+                st.markdown("**Records per disaster type**")
+                counts_dis = mongo.count_by_field("predictions", "disaster_type")
+                st.bar_chart(
+                    pd.DataFrame(
+                        list(counts_dis.items()), columns=["disaster_type", "count"]
+                    ).set_index("disaster_type")
+                )
+
+            # Severity distribution filter
+            st.markdown("---")
+            st.markdown("**Severity distribution explorer**")
+            sev_series = pd.to_numeric(df_mongo["severity"], errors="coerce").dropna()
+            sev_min, sev_max = float(sev_series.min()), float(sev_series.max())
+            sev_range = st.slider(
+                "Filter by severity range",
+                min_value=sev_min,
+                max_value=sev_max,
+                value=(sev_min, sev_max),
+                key="mongo_sev_slider",
+            )
+            df_sev_filtered = df_mongo[
+                pd.to_numeric(df_mongo["severity"], errors="coerce").between(*sev_range)
+            ]
+            st.markdown(
+                f"**{len(df_sev_filtered)} records** in severity range `{sev_range[0]:.3f}` – `{sev_range[1]:.3f}`"
+            )
+
+            agg_col1, agg_col2 = st.columns(2)
+            with agg_col1:
+                st.markdown("**Avg severity by region (filtered)**")
+                agg_region = (
+                    df_sev_filtered.groupby("region")["severity"]
+                    .mean()
+                    .apply(lambda x: round(float(x), 3))
+                )
+                st.dataframe(agg_region.rename("avg_severity"))
+            with agg_col2:
+                st.markdown("**Avg severity by disaster (filtered)**")
+                agg_dis = (
+                    df_sev_filtered.groupby("disaster_type")["severity"]
+                    .mean()
+                    .apply(lambda x: round(float(x), 3))
+                )
+                st.dataframe(agg_dis.rename("avg_severity"))
+
+        st.markdown("---")
 
         with st.expander("Query & export predictions"):
             st.markdown("Examples: `{'region':'ZoneA'}`, `{'disaster_type':'Flood'}`")
@@ -469,8 +743,6 @@ elif selected_tab == "MongoDB":
             )
             if sample_examples != "--none--" and q_text == "":
                 q_text = sample_examples
-
-            docs_all = mongo.find_all("predictions")
 
             if st.button("Run query", key="mongo_run_query"):
                 if q_text:
@@ -492,7 +764,6 @@ elif selected_tab == "MongoDB":
                     datetime.datetime.utcnow().isoformat()
                 )
 
-            # Always read from session_state — persists across reruns without touching tabs
             display_docs = st.session_state.get("mongo_query_results", docs_all)
 
             if display_docs:
@@ -504,7 +775,6 @@ elif selected_tab == "MongoDB":
             else:
                 st.write("No documents match the query.")
 
-            # Download button always rendered unconditionally — never nested inside st.button
             st.download_button(
                 "Download JSON of current query results",
                 data=_json.dumps(display_docs, default=str, indent=2),
