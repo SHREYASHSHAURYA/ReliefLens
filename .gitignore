@@ -11,4 +11,8 @@ data/
 *.keras
 *.json
 !label_map.json
-!metrics.json
+!metrics.json
+
+# Streamlit
+/.streamlit/
+.venv_streamlit/
